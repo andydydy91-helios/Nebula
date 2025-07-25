@@ -12,17 +12,37 @@ import { MinecraftVersion } from './util/MinecraftVersion.js'
 import { ServerStructure } from './structure/spec_model/Server.struct.js'
 
 dotenv.config()
-console.log('ROOT env:', process.env.ROOT)
+
 const logger = LoggerUtil.getLogger('Index')
 
-// Fonction pour récupérer la racine (root) depuis argv ou .env
+// Fonction pour récupérer ROOT (priorité argv > .env)
 function getRoot(argv: any): string {
   if (argv.root) return resolvePath(argv.root)
   if (process.env.ROOT) return resolvePath(process.env.ROOT)
   throw new Error('Root path not specified. Use --root or set ROOT in .env')
 }
 
-// Commande: init root <root>
+// Fonction pour récupérer BASE_URL valide (priorité argv > .env)
+function getBaseURL(argv: any): string {
+  const rawUrl = argv.baseUrl ?? process.env.BASE_URL
+  if (!rawUrl) throw new Error('BASE_URL not specified. Use --baseUrl or set BASE_URL in .env')
+
+  let urlStr = rawUrl.trim()
+  if (!urlStr.match(/^https?:\/\//)) {
+    // Ajoute https:// par défaut si absent
+    urlStr = 'https://' + urlStr
+  }
+
+  try {
+    // Valide que c'est une URL correcte
+    const url = new URL(urlStr)
+    return url.toString()
+  } catch (err) {
+    throw new Error(`Invalid BASE_URL: ${urlStr}`)
+  }
+}
+
+// Commande "init root"
 const initRootCommand: CommandModule = {
   command: 'root <root>',
   describe: 'Generate an empty standard file structure.',
@@ -34,31 +54,23 @@ const initRootCommand: CommandModule = {
   handler: async (argv) => {
     const root = argv.root as string
     logger.debug(`Root set to ${root}`)
+    logger.debug('Invoked init root.')
+
     try {
       await generateSchemas(root)
       await new DistributionStructure(root, '', false, false).init()
       await new CurseForgeParser(root, '').init()
       logger.info(`Successfully created new root at ${root}`)
-    } catch (error) {
-      logger.error(`Failed to init new root at ${root}`, error)
+    } catch (error: unknown) {
+      logger.error(`Failed to init new root at ${root}`, error instanceof Error ? error.message : error)
+      process.exit(1)
     }
   }
 }
 
-// Commande: init (regroupe init root)
-const initCommand: CommandModule = {
-  command: 'init',
-  aliases: ['i'],
-  describe: 'Base init command.',
-  builder: (yargs: Argv) => yargs.command(initRootCommand),
-  handler: (argv) => {
-    argv._handled = true
-  }
-}
-
-// Commande: generate server <id> <version>
+// Commande "generate server"
 const generateServerCommand: CommandModule = {
-  command: 'server <id> <version>',
+  command: 'generate server <id> <version>',
   describe: 'Generate a new server configuration.',
   builder: (yargs: Argv) => yargs
     .positional('id', {
@@ -88,8 +100,8 @@ const generateServerCommand: CommandModule = {
     let root: string
     try {
       root = getRoot(argv)
-    } catch (e: any) {
-      logger.error(e.message)
+    } catch (error: unknown) {
+      logger.error(error instanceof Error ? error.message : error)
       process.exit(1)
       return
     }
@@ -106,76 +118,74 @@ const generateServerCommand: CommandModule = {
         fabricVersion: argv.fabric as string
       })
       logger.info('Server generated successfully.')
-    } catch (error) {
-      logger.error('Error generating server:', error)
+    } catch (error: unknown) {
+      logger.error('Error generating server:', error instanceof Error ? error.message : error)
+      process.exit(1)
     }
   }
 }
 
-// Commande: generate distro [name]
+// Commande "generate distro"
 const generateDistroCommand: CommandModule = {
-  command: 'distro [name]',
-  describe: 'Generate a distribution index from the root file structure.',
+  command: 'generate distro',
+  describe: 'Generate distribution JSON file.',
   builder: (yargs: Argv) => yargs
-    .positional('name', {
-      describe: 'Distribution file name',
-      type: 'string',
-      default: 'distribution'
-    })
     .option('root', {
       describe: 'Root directory',
       type: 'string',
       demandOption: false,
       coerce: (arg: string) => resolvePath(arg)
+    })
+    .option('baseUrl', {
+      describe: 'Base URL for distribution',
+      type: 'string',
+      demandOption: false
     }),
   handler: async (argv) => {
     let root: string
+    let baseUrl: string
+
     try {
       root = getRoot(argv)
-    } catch (e: any) {
-      logger.error(e.message)
+      baseUrl = getBaseURL(argv)
+    } catch (error: unknown) {
+      logger.error(error instanceof Error ? error.message : error)
       process.exit(1)
       return
     }
 
-    const finalName = `${argv.name}.json`
-    logger.info(`Generating distribution ${finalName} at root ${root}`)
+    logger.info(`Generating distribution distribution.json at root ${root}`)
+    logger.info(`Using BASE_URL: ${baseUrl}`)
 
     try {
-      const distributionStruct = new DistributionStructure(root, '', false, false)
-      const distro = await distributionStruct.getSpecModel()
-      const fs = await import('fs/promises')
-      const path = await import('path')
-      const distroOut = JSON.stringify(distro, null, 2)
-      const distroPath = path.resolve(root, finalName)
-      await fs.writeFile(distroPath, distroOut)
-      logger.info(`Successfully generated ${finalName}`)
-      logger.info(`Saved to ${distroPath}`)
-    } catch (error) {
-      logger.error('Failed to generate distribution.', error)
+      const distStruct = new DistributionStructure(root, baseUrl, false, false)
+      await distStruct.init()
+      logger.info('Distribution generated successfully.')
+    } catch (error: unknown) {
+      logger.error('Failed to generate distribution.', error instanceof Error ? error.message : error)
+      process.exit(1)
     }
   }
 }
 
-// Commande: generate (regroupe generate server & distro)
-const generateCommand: CommandModule = {
-  command: 'generate',
-  aliases: ['g'],
-  describe: 'Base generate command.',
-  builder: (yargs: Argv) => yargs
-    .command(generateServerCommand)
-    .command(generateDistroCommand),
+// Commande "init" principale (qui intègre init root)
+const initCommand: CommandModule = {
+  command: 'init',
+  aliases: ['i'],
+  describe: 'Base init command.',
+  builder: (yargs: Argv) => yargs.command(initRootCommand),
   handler: (argv) => {
     argv._handled = true
   }
 }
 
-// Configuration finale de yargs
+// Configuration yargs avec toutes les commandes
 yargs(hideBin(process.argv))
   .version(false)
   .scriptName('')
   .command(initCommand)
-  .command(generateCommand)
+  .command(generateServerCommand)
+  .command(generateDistroCommand)
   .demandCommand()
   .help()
   .parse()
